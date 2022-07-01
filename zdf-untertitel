@@ -1,0 +1,113 @@
+#!/usr/bin/env python
+
+import argparse
+# `from bs4 import BeautifulSoup` used further down
+import json
+import re
+import requests as r
+import sys
+
+# I don't know if this script will still work when/if they change their player.
+# I'm also not sure where this value even comes from.
+player = 'ngplayer_2_4'
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--xml", action="store_true")
+    parser.add_argument("--output")
+    parser.add_argument("video")
+    args = parser.parse_args()
+
+    video = fix_video_url(args.video)
+
+    # get video page
+    response = r.get(video)
+    if response.status_code != 200:
+        print("Failed to get video page.", file=sys.stderr)
+        sys.exit(1)
+
+    # parse API url
+    zdf_api = re.search('"contentUrl": "https://api\\.zdf\\.de/.*?",', response.text)
+    zdf_api = zdf_api.group().split(':', 1)[1]
+    zdf_api = zdf_api.strip().removeprefix('"').removesuffix('",')
+    zdf_api = zdf_api.replace('{playerId}', player)
+
+    # parse API auth token
+    auth_token = re.search('"apiToken": ".*?"', response.text)
+    auth_token = auth_token.group().split(':', 1)[1]
+    auth_token = auth_token.strip().removeprefix('"').removesuffix('"')
+
+    # get API data
+    response = r.get(zdf_api, headers={'Api-Auth': 'Bearer ' + auth_token})
+    if response.status_code != 200:
+        print(response.status_code)
+        print("Failed to get data from api.", file=sys.stderr)
+        sys.exit(1)
+
+    # parse out the url of the subtitles and fetch them
+    api_json = json.loads(response.text)
+    try:
+        res = api_json['captions'][0]['uri']
+    except IndexError:
+        print("This video does not have subtitles.", file=sys.stderr)
+        sys.exit(1)
+    subtitles = r.get(res)
+    if subtitles.status_code != 200:
+        print("Failed to get subtitles.", file=sys.stderr)
+        sys.exit(1)
+    subtitles = subtitles.text
+
+
+    # if raw xml is wanted
+    if args.xml:
+        # NOP
+        pass
+    else:
+        # parse
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(subtitles, 'lxml-xml')
+
+        # subtitles can be cleared here, since it's already in souped
+        subtitles = ""
+        prev_col = ""
+        for tag in soup.find_all('span'):
+            col = tag['style']
+            if col == prev_col:
+                subtitles += "    "
+            else:
+                subtitles += col + ': '
+            prev_col = col
+            subtitles += tag.text + '\n'
+
+    # output
+    if args.output:
+        with open(args.output, 'w') as f:
+            f.write(subtitles)
+    else:
+        print(subtitles)
+
+
+'''
+Checks if input url is all in order and corrects it if it is not.
+If major changes to the url are made the new url is announced on stderr.
+
+Zdf usually finds the correct video even if part of the path is missing.
+'''
+def fix_video_url(input):
+    # add the extension if it's missing
+    if not input.endswith('.html'):
+        input += '.html'
+    # if it's a correct url just return it (most common case)
+    if input.startswith('https://www.zdf.de') or input.startswith('https://zdf.de'):
+        return input
+    # if the protocol is missing add it and return the new url
+    if input.startswith('www.zdf.de') or input.startswith('zdf.de'):
+        return 'https://' + input
+    # if it doesn't resemble a url assume it's just the path and create a url using that
+    url = 'https://www.zdf.de/' + input
+    print(url, file=sys.stderr)
+    return url
+
+
+if __name__ == '__main__':
+    main()
